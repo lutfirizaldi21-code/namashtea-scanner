@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#5C3D2E">
+  <title>Namashtea Barcode Scanner</title>
+  <script src="https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js"></script>
+  <style>
+    :root{color-scheme:dark;--brown:#5C3D2E;--gold:#C5A07B;--paper:#FAF6F0}
+    *{box-sizing:border-box}
+    body{margin:0;background:#181512;color:white;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;min-height:100vh;display:flex;flex-direction:column}
+    header{padding:18px 16px 12px;text-align:center;background:var(--brown)}
+    header h1{font-size:19px;margin:0 0 4px}header p{font-size:13px;margin:0;color:#f3e5d8}
+    main{width:100%;max-width:620px;margin:0 auto;padding:16px;display:flex;flex:1;flex-direction:column;gap:14px}
+    .preview-wrap{position:relative;background:#000;border-radius:18px;overflow:hidden;min-height:300px;display:flex;align-items:center;justify-content:center;flex:1}
+    video{width:100%;height:100%;min-height:300px;max-height:66vh;object-fit:cover;background:#000}
+    .aim{position:absolute;width:80%;max-width:360px;height:155px;border:2px solid rgba(255,255,255,.88);border-radius:14px;box-shadow:0 0 0 100vmax rgba(0,0,0,.32);pointer-events:none}
+    .laser{position:absolute;left:0;top:50%;width:100%;height:2px;background:#ff3838;box-shadow:0 0 8px #ff3838;animation:scan 1.7s infinite alternate}
+    @keyframes scan{from{transform:translateY(-70px)}to{transform:translateY(70px)}}
+    .status{background:#2b2723;border:1px solid #51473d;border-radius:12px;padding:12px 14px;line-height:1.45;font-size:13px;overflow-wrap:anywhere;white-space:pre-wrap}
+    .actions{display:flex;gap:10px}
+    button{border:0;border-radius:12px;padding:13px 16px;font-size:14px;font-weight:700;cursor:pointer;min-height:48px}
+    #start{background:var(--gold);color:#21170f;flex:1}#close{background:#423b35;color:white}
+    .hint{text-align:center;color:#d5c8bb;font-size:12px;margin:0 0 8px}
+    @media (max-width:420px){main{padding:12px}.preview-wrap,video{min-height:260px}.aim{height:135px}}
+  </style>
+</head>
+<body>
+  <header><h1>Namashtea · Barcode Scanner</h1><p>Arahkan barcode ke dalam kotak</p></header>
+  <main>
+    <div class="preview-wrap">
+      <video id="preview" autoplay muted playsinline></video>
+      <div class="aim"><div class="laser"></div></div>
+    </div>
+    <div id="status" class="status" role="status" aria-live="polite">Menyiapkan kamera...</div>
+    <p class="hint">Gunakan kamera belakang dan pastikan barcode cukup terang serta fokus.</p>
+    <div class="actions"><button id="start" type="button" onclick="startScanner()">Aktifkan / Coba Lagi</button><button id="close" type="button" onclick="closeScanner()">Tutup</button></div>
+  </main>
+<script>
+  let reader = null;
+  let scannerControls = null;
+  let temporaryStream = null;
+  let scannerStarted = false;
+  let scanSent = false;
+  const video = document.getElementById('preview');
+  const statusBox = document.getElementById('status');
+  const startButton = document.getElementById('start');
+
+  function setStatus(message) { statusBox.textContent = message; }
+
+  function stopAllCameraStreams() {
+    try { if (scannerControls && scannerControls.stop) scannerControls.stop(); } catch (e) {}
+    scannerControls = null;
+    try { if (reader) reader.reset(); } catch (e) {}
+    reader = null;
+    if (temporaryStream) {
+      temporaryStream.getTracks().forEach(track => { try { track.stop(); } catch (e) {} });
+      temporaryStream = null;
+    }
+    try { video.pause(); } catch (e) {}
+    video.srcObject = null;
+    scannerStarted = false;
+  }
+
+  async function startScanner() {
+    if (scannerStarted || scanSent) return;
+    scannerStarted = true;
+    startButton.disabled = true;
+    startButton.textContent = 'Mengaktifkan kamera...';
+    setStatus('Meminta izin kamera...');
+
+    try {
+      if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error('Halaman scanner harus dibuka melalui HTTPS pada browser yang mendukung kamera.');
+      }
+      if (!window.ZXing || !window.ZXing.BrowserMultiFormatReader) {
+        throw new Error('Library barcode gagal dimuat. Periksa koneksi internet lalu muat ulang halaman.');
+      }
+
+      // Buka kamera lebih dahulu agar browser meminta izin dan label kamera menjadi tersedia.
+      temporaryStream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } }
+      });
+      const track = temporaryStream.getVideoTracks()[0];
+      const settings = track && track.getSettings ? track.getSettings() : {};
+      const devices = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput');
+      const rear = devices.find(d => /back|rear|environment|belakang|tr[aá]s|main camera/i.test(d.label || ''));
+      const deviceId = rear ? rear.deviceId : (settings.deviceId || undefined);
+      temporaryStream.getTracks().forEach(t => { try { t.stop(); } catch (e) {} });
+      temporaryStream = null;
+
+      video.autoplay = true;
+      video.muted = true;
+      video.playsInline = true;
+      const hints = new Map();
+      hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
+        ZXing.BarcodeFormat.EAN_13, ZXing.BarcodeFormat.EAN_8,
+        ZXing.BarcodeFormat.UPC_A, ZXing.BarcodeFormat.UPC_E,
+        ZXing.BarcodeFormat.CODE_128, ZXing.BarcodeFormat.CODE_39,
+        ZXing.BarcodeFormat.ITF, ZXing.BarcodeFormat.QR_CODE
+      ]);
+      hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+      reader = new ZXing.BrowserMultiFormatReader(hints, 250);
+      setStatus('Kamera aktif. Arahkan barcode ke dalam kotak.');
+      startButton.textContent = 'Kamera Aktif';
+      scannerControls = await reader.decodeFromVideoDevice(deviceId || null, video, (result, error) => {
+        if (!result || scanSent) return;
+        const barcode = String(result.getText() || '').trim();
+        if (!barcode) return;
+        scanSent = true;
+        setStatus('Barcode terbaca: ' + barcode + '\nMengirim hasil ke form stok...');
+        stopAllCameraStreams();
+        startButton.textContent = 'Barcode Berhasil';
+        startButton.disabled = true;
+        try {
+          if (window.opener && !window.opener.closed) {
+            window.opener.postMessage({ type: 'NAMASHTEA_BARCODE_SCAN_SUCCESS', barcode: barcode }, '*');
+            setTimeout(() => { try { window.close(); } catch (e) {} }, 650);
+          } else {
+            setStatus('Barcode terbaca: ' + barcode + '\nJendela aplikasi utama tidak ditemukan. Salin barcode ini ke form stok: ' + barcode);
+            startButton.textContent = 'Tutup';
+            startButton.disabled = false;
+            startButton.onclick = closeScanner;
+          }
+        } catch (e) {
+          setStatus('Barcode terbaca: ' + barcode + '\nGagal mengirim ke aplikasi utama. Masukkan barcode secara manual.');
+          startButton.disabled = false;
+        }
+      });
+    } catch (error) {
+      stopAllCameraStreams();
+      const name = error && error.name ? error.name : 'Error';
+      const detail = error && error.message ? error.message : String(error || 'Kesalahan tidak diketahui.');
+      let guidance = '';
+      if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
+        guidance = '\n\nBrowser menolak akses kamera pada halaman scanner ini. Pastikan alamat GitHub Pages dibuka langsung melalui HTTPS dan izin kamera untuk github.io diizinkan.';
+      } else if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
+        guidance = '\n\nTidak ditemukan kamera pada perangkat.';
+      } else if (name === 'NotReadableError' || name === 'TrackStartError') {
+        guidance = '\n\nKamera kemungkinan sedang digunakan aplikasi lain. Tutup aplikasi kamera lalu coba lagi.';
+      }
+      setStatus('Gagal membuka kamera (' + name + '):\n' + detail + guidance);
+      startButton.textContent = 'Coba Lagi';
+      startButton.disabled = false;
+    }
+  }
+
+  function closeScanner() {
+    stopAllCameraStreams();
+    try { window.close(); } catch (e) {}
+    setStatus('Scanner ditutup. Jika jendela tidak tertutup otomatis, Anda dapat menutup tab ini.');
+  }
+
+  window.addEventListener('pagehide', stopAllCameraStreams);
+  window.addEventListener('beforeunload', stopAllCameraStreams);
+  // Coba membuka kamera langsung; tombol Coba Lagi tersedia jika browser membutuhkan aksi manual.
+  window.addEventListener('load', () => startScanner());
+</script>
+</body>
+</html>
